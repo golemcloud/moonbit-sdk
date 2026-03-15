@@ -99,6 +99,9 @@ pub(all) enum DbColumnType {
   Domain(DomainType)
   Array(LazyDbColumnType)
   Range(RangeType)
+  Vector
+  Halfvec
+  Sparsevec
 }
 pub impl Eq for DbColumnType
 pub impl Show for DbColumnType
@@ -192,6 +195,9 @@ pub(all) enum DbValue {
   Array(Array[LazyDbValue])
   Range(Range)
   Null
+  Vector(FixedArray[Float])
+  Halfvec(FixedArray[Float])
+  Sparsevec(SparseVec)
 }
 pub impl Eq for DbValue
 pub impl Show for DbValue
@@ -307,6 +313,14 @@ pub(all) struct RangeType {
 }
 pub impl Eq for RangeType
 pub impl Show for RangeType
+
+pub(all) struct SparseVec {
+  dim : Int
+  indices : FixedArray[Int]
+  values : FixedArray[Float]
+}
+pub impl Eq for SparseVec
+pub impl Show for SparseVec
 
 pub(all) enum Tsbound {
   Included(@types.Timestamp)

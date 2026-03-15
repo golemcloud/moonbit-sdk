@@ -2,14 +2,14 @@
 package "golemcloud/golem_sdk/interface/golem/api/host"
 
 import {
-  "golemcloud/golem_sdk/interface/golem/rpc/types",
+  "golemcloud/golem_sdk/interface/golem/core/types",
   "golemcloud/golem_sdk/interface/wasi/io/poll",
 }
 
 // Values
-pub fn complete_promise(PromiseId, FixedArray[Byte]) -> Bool
+pub fn complete_promise(@types.PromiseId, FixedArray[Byte]) -> Bool
 
-pub fn create_promise() -> PromiseId
+pub fn create_promise() -> @types.PromiseId
 
 pub fn fork() -> ForkResult
 
@@ -25,7 +25,7 @@ pub fn get_oplog_index() -> UInt64
 
 pub fn get_oplog_persistence_level() -> PersistenceLevel
 
-pub fn get_promise(PromiseId) -> GetPromiseResult
+pub fn get_promise(@types.PromiseId) -> GetPromiseResult
 
 pub fn get_retry_policy() -> RetryPolicy
 
@@ -58,12 +58,6 @@ pub fn update_agent(@types.AgentId, UInt64, UpdateMode) -> Unit
 // Errors
 
 // Types and methods
-pub(all) struct AccountId {
-  uuid : @types.Uuid
-}
-pub impl Eq for AccountId
-pub impl Show for AccountId
-
 pub(all) struct AgentAllFilter {
   filters : Array[AgentPropertyFilter]
 }
@@ -107,6 +101,7 @@ pub(all) struct AgentMetadata {
   status : AgentStatus
   component_revision : UInt64
   retry_count : UInt64
+  environment_id : EnvironmentId
 }
 pub impl Eq for AgentMetadata
 pub impl Show for AgentMetadata
@@ -215,13 +210,6 @@ pub(all) enum PersistenceLevel {
 pub impl Eq for PersistenceLevel
 pub impl Show for PersistenceLevel
 
-pub(all) struct PromiseId {
-  agent_id : @types.AgentId
-  oplog_idx : UInt64
-}
-pub impl Eq for PromiseId
-pub impl Show for PromiseId
-
 pub(all) struct RetryPolicy {
   max_attempts : UInt
   min_delay : UInt64
@@ -238,6 +226,13 @@ pub(all) enum RevertAgentTarget {
 }
 pub impl Eq for RevertAgentTarget
 pub impl Show for RevertAgentTarget
+
+pub(all) struct Snapshot {
+  data : FixedArray[Byte]
+  mime_type : String
+}
+pub impl Eq for Snapshot
+pub impl Show for Snapshot
 
 pub(all) enum StringFilterComparator {
   EQUAL

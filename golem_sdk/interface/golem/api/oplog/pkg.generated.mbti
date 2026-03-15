@@ -4,13 +4,24 @@ package "golemcloud/golem_sdk/interface/golem/api/oplog"
 import {
   "golemcloud/golem_sdk/interface/golem/api/context",
   "golemcloud/golem_sdk/interface/golem/api/host",
-  "golemcloud/golem_sdk/interface/golem/rpc/types",
+  "golemcloud/golem_sdk/interface/golem/core/types",
   "golemcloud/golem_sdk/interface/wasi/clocks/wallClock",
 }
 
 // Values
+pub fn enrich_oplog_entries(@host.EnvironmentId, @types.AgentId, Array[(UInt64, OplogEntry)], UInt64) -> Result[Array[PublicOplogEntry], String]
 
 // Errors
+pub(all) suberror WorkerError {
+  Unknown(String)
+  InvalidRequest(String)
+  StackOverflow
+  OutOfMemory
+  ExceededMemoryLimit
+  InternalError(String)
+}
+pub impl Eq for WorkerError
+pub impl Show for WorkerError
 
 // Types and methods
 pub(all) struct ActivatePluginParameters {
@@ -20,12 +31,70 @@ pub(all) struct ActivatePluginParameters {
 pub impl Eq for ActivatePluginParameters
 pub impl Show for ActivatePluginParameters
 
+pub(all) struct AgentInitializationParameters {
+  idempotency_key : String
+  constructor_parameters : TypedDataValue
+  trace_id : String
+  trace_states : Array[String]
+  invocation_context : Array[Array[SpanData]]
+}
+pub impl Eq for AgentInitializationParameters
+pub impl Show for AgentInitializationParameters
+
 pub(all) enum AgentInvocation {
-  ExportedFunction(ExportedFunctionInvocationParameters)
-  ManualUpdate(UInt64)
+  AgentInitialization(AgentInitializationParameters)
+  AgentMethodInvocation(AgentMethodInvocationParameters)
+  SaveSnapshot
+  LoadSnapshot(LoadSnapshotParameters)
+  ProcessOplogEntries(ProcessOplogEntriesParameters)
+  ManualUpdate(ManualUpdateParameters)
 }
 pub impl Eq for AgentInvocation
 pub impl Show for AgentInvocation
+
+pub(all) struct AgentInvocationFinishedParameters {
+  timestamp : @wallClock.Datetime
+  invocation_result : AgentInvocationResult
+  consumed_fuel : Int64
+  component_revision : UInt64
+}
+pub impl Eq for AgentInvocationFinishedParameters
+pub impl Show for AgentInvocationFinishedParameters
+
+pub(all) struct AgentInvocationOutputParameters {
+  output : TypedDataValue
+}
+pub impl Eq for AgentInvocationOutputParameters
+pub impl Show for AgentInvocationOutputParameters
+
+pub(all) enum AgentInvocationResult {
+  AgentInitialization(AgentInvocationOutputParameters)
+  AgentMethod(AgentInvocationOutputParameters)
+  ManualUpdate
+  LoadSnapshot(FallibleResultParameters)
+  SaveSnapshot(SaveSnapshotResultParameters)
+  ProcessOplogEntries(FallibleResultParameters)
+}
+pub impl Eq for AgentInvocationResult
+pub impl Show for AgentInvocationResult
+
+pub(all) struct AgentInvocationStartedParameters {
+  timestamp : @wallClock.Datetime
+  invocation : AgentInvocation
+}
+pub impl Eq for AgentInvocationStartedParameters
+pub impl Show for AgentInvocationStartedParameters
+
+pub(all) struct AgentMethodInvocationParameters {
+  idempotency_key : String
+  method_name : String
+  function_input : TypedDataValue
+  trace_id : String
+  trace_states : Array[String]
+  invocation_context : Array[Array[SpanData]]
+}
+pub impl Eq for AgentMethodInvocationParameters
+pub impl Show for AgentMethodInvocationParameters
 
 pub(all) struct BeginRemoteTransactionParameters {
   timestamp : @wallClock.Datetime
@@ -34,12 +103,12 @@ pub(all) struct BeginRemoteTransactionParameters {
 pub impl Eq for BeginRemoteTransactionParameters
 pub impl Show for BeginRemoteTransactionParameters
 
-pub(all) struct CancelInvocationParameters {
+pub(all) struct CancelPendingInvocationParameters {
   timestamp : @wallClock.Datetime
   idempotency_key : String
 }
-pub impl Eq for CancelInvocationParameters
-pub impl Show for CancelInvocationParameters
+pub impl Eq for CancelPendingInvocationParameters
+pub impl Show for CancelPendingInvocationParameters
 
 pub(all) struct ChangePersistenceLevelParameters {
   timestamp : @wallClock.Datetime
@@ -61,13 +130,14 @@ pub(all) struct CreateParameters {
   component_revision : UInt64
   args : Array[String]
   env : Array[(String, String)]
-  created_by : @host.AccountId
+  created_by : @types.AccountId
   environment_id : @host.EnvironmentId
   parent : @types.AgentId?
   component_size : UInt64
   initial_total_linear_memory_size : UInt64
   initial_active_plugins : Array[PluginInstallationDescription]
   config_vars : Array[(String, String)]
+  local_agent_config : Array[LocalAgentConfigEntry]
 }
 pub impl Eq for CreateParameters
 pub impl Show for CreateParameters
@@ -119,37 +189,6 @@ pub(all) struct ErrorParameters {
 pub impl Eq for ErrorParameters
 pub impl Show for ErrorParameters
 
-pub(all) struct ExportedFunctionCompletedParameters {
-  timestamp : @wallClock.Datetime
-  response : @types.ValueAndType?
-  consumed_fuel : Int64
-}
-pub impl Eq for ExportedFunctionCompletedParameters
-pub impl Show for ExportedFunctionCompletedParameters
-
-pub(all) struct ExportedFunctionInvocationParameters {
-  idempotency_key : String
-  function_name : String
-  input : Array[@types.ValueAndType]?
-  trace_id : String
-  trace_states : Array[String]
-  invocation_context : Array[Array[SpanData]]
-}
-pub impl Eq for ExportedFunctionInvocationParameters
-pub impl Show for ExportedFunctionInvocationParameters
-
-pub(all) struct ExportedFunctionInvokedParameters {
-  timestamp : @wallClock.Datetime
-  function_name : String
-  request : Array[@types.ValueAndType]
-  idempotency_key : String
-  trace_id : String
-  trace_states : Array[String]
-  invocation_context : Array[Array[SpanData]]
-}
-pub impl Eq for ExportedFunctionInvokedParameters
-pub impl Show for ExportedFunctionInvokedParameters
-
 pub(all) struct ExternalSpanData {
   span_id : String
 }
@@ -164,6 +203,12 @@ pub(all) struct FailedUpdateParameters {
 pub impl Eq for FailedUpdateParameters
 pub impl Show for FailedUpdateParameters
 
+pub(all) struct FallibleResultParameters {
+  error : String?
+}
+pub impl Eq for FallibleResultParameters
+pub impl Show for FallibleResultParameters
+
 pub(all) struct FinishSpanParameters {
   timestamp : @wallClock.Datetime
   span_id : String
@@ -173,7 +218,7 @@ pub impl Show for FinishSpanParameters
 
 pub(all) struct GetOplog(Int)
 pub fn GetOplog::drop(Self) -> Unit
-pub fn GetOplog::get_next(Self) -> Array[OplogEntry]?
+pub fn GetOplog::get_next(Self) -> Array[PublicOplogEntry]?
 pub fn GetOplog::get_oplog(@types.AgentId, UInt64) -> Self
 #deprecated
 pub fn GetOplog::inner(Self) -> Int
@@ -187,15 +232,15 @@ pub(all) struct GrowMemoryParameters {
 pub impl Eq for GrowMemoryParameters
 pub impl Show for GrowMemoryParameters
 
-pub(all) struct ImportedFunctionInvokedParameters {
+pub(all) struct HostCallParameters {
   timestamp : @wallClock.Datetime
   function_name : String
   request : @types.ValueAndType
   response : @types.ValueAndType
   wrapped_function_type : WrappedFunctionType
 }
-pub impl Eq for ImportedFunctionInvokedParameters
-pub impl Show for ImportedFunctionInvokedParameters
+pub impl Eq for HostCallParameters
+pub impl Show for HostCallParameters
 
 pub(all) struct JumpParameters {
   timestamp : @wallClock.Datetime
@@ -203,6 +248,19 @@ pub(all) struct JumpParameters {
 }
 pub impl Eq for JumpParameters
 pub impl Show for JumpParameters
+
+pub(all) struct LoadSnapshotParameters {
+  snapshot : @host.Snapshot
+}
+pub impl Eq for LoadSnapshotParameters
+pub impl Show for LoadSnapshotParameters
+
+pub(all) struct LocalAgentConfigEntry {
+  key : Array[String]
+  value : @types.ValueAndType
+}
+pub impl Eq for LocalAgentConfigEntry
+pub impl Show for LocalAgentConfigEntry
 
 pub(all) struct LocalSpanData {
   span_id : String
@@ -239,13 +297,19 @@ pub(all) struct LogParameters {
 pub impl Eq for LogParameters
 pub impl Show for LogParameters
 
+pub(all) struct ManualUpdateParameters {
+  target_revision : UInt64
+}
+pub impl Eq for ManualUpdateParameters
+pub impl Show for ManualUpdateParameters
+
 pub(all) enum OplogEntry {
-  Create(CreateParameters)
-  ImportedFunctionInvoked(ImportedFunctionInvokedParameters)
-  ExportedFunctionInvoked(ExportedFunctionInvokedParameters)
-  ExportedFunctionCompleted(ExportedFunctionCompletedParameters)
+  Create(RawCreateParameters)
+  HostCall(RawHostCallParameters)
+  AgentInvocationStarted(RawAgentInvocationStartedParameters)
+  AgentInvocationFinished(RawAgentInvocationFinishedParameters)
   Suspend(Timestamp)
-  Error(ErrorParameters)
+  Error(RawErrorParameters)
   NoOp(Timestamp)
   Jump(JumpParameters)
   Interrupted(Timestamp)
@@ -255,31 +319,46 @@ pub(all) enum OplogEntry {
   EndAtomicRegion(EndAtomicRegionParameters)
   BeginRemoteWrite(Timestamp)
   EndRemoteWrite(EndRemoteWriteParameters)
-  PendingAgentInvocation(PendingAgentInvocationParameters)
-  PendingUpdate(PendingUpdateParameters)
-  SuccessfulUpdate(SuccessfulUpdateParameters)
+  PendingAgentInvocation(RawPendingAgentInvocationParameters)
+  PendingUpdate(RawPendingUpdateParameters)
+  SuccessfulUpdate(RawSuccessfulUpdateParameters)
   FailedUpdate(FailedUpdateParameters)
   GrowMemory(GrowMemoryParameters)
-  CreateResource(CreateResourceParameters)
-  DropResource(DropResourceParameters)
+  CreateResource(RawCreateResourceParameters)
+  DropResource(RawDropResourceParameters)
   Log(LogParameters)
   Restart(Timestamp)
-  ActivatePlugin(ActivatePluginParameters)
-  DeactivatePlugin(DeactivatePluginParameters)
+  ActivatePlugin(RawActivatePluginParameters)
+  DeactivatePlugin(RawDeactivatePluginParameters)
   Revert(RevertParameters)
-  CancelInvocation(CancelInvocationParameters)
+  CancelPendingInvocation(CancelPendingInvocationParameters)
   StartSpan(StartSpanParameters)
   FinishSpan(FinishSpanParameters)
   SetSpanAttribute(SetSpanAttributeParameters)
   ChangePersistenceLevel(ChangePersistenceLevelParameters)
-  BeginRemoteTransaction(BeginRemoteTransactionParameters)
+  BeginRemoteTransaction(RawBeginRemoteTransactionParameters)
   PreCommitRemoteTransaction(RemoteTransactionParameters)
   PreRollbackRemoteTransaction(RemoteTransactionParameters)
   CommittedRemoteTransaction(RemoteTransactionParameters)
   RolledBackRemoteTransaction(RemoteTransactionParameters)
+  Snapshot(RawSnapshotParameters)
 }
 pub impl Eq for OplogEntry
 pub impl Show for OplogEntry
+
+pub(all) struct OplogExternalPayload {
+  payload_id : @types.Uuid
+  md5_hash : FixedArray[Byte]
+}
+pub impl Eq for OplogExternalPayload
+pub impl Show for OplogExternalPayload
+
+pub(all) enum OplogPayload {
+  Inline(FixedArray[Byte])
+  External(OplogExternalPayload)
+}
+pub impl Eq for OplogPayload
+pub impl Show for OplogPayload
 
 pub(all) struct OplogRegion {
   start : UInt64
@@ -311,6 +390,206 @@ pub(all) struct PluginInstallationDescription {
 pub impl Eq for PluginInstallationDescription
 pub impl Show for PluginInstallationDescription
 
+pub(all) struct ProcessOplogEntriesParameters {
+  idempotency_key : String
+}
+pub impl Eq for ProcessOplogEntriesParameters
+pub impl Show for ProcessOplogEntriesParameters
+
+pub(all) enum PublicOplogEntry {
+  Create(CreateParameters)
+  HostCall(HostCallParameters)
+  AgentInvocationStarted(AgentInvocationStartedParameters)
+  AgentInvocationFinished(AgentInvocationFinishedParameters)
+  Suspend(Timestamp)
+  Error(ErrorParameters)
+  NoOp(Timestamp)
+  Jump(JumpParameters)
+  Interrupted(Timestamp)
+  Exited(Timestamp)
+  ChangeRetryPolicy(ChangeRetryPolicyParameters)
+  BeginAtomicRegion(Timestamp)
+  EndAtomicRegion(EndAtomicRegionParameters)
+  BeginRemoteWrite(Timestamp)
+  EndRemoteWrite(EndRemoteWriteParameters)
+  PendingAgentInvocation(PendingAgentInvocationParameters)
+  PendingUpdate(PendingUpdateParameters)
+  SuccessfulUpdate(SuccessfulUpdateParameters)
+  FailedUpdate(FailedUpdateParameters)
+  GrowMemory(GrowMemoryParameters)
+  CreateResource(CreateResourceParameters)
+  DropResource(DropResourceParameters)
+  Log(LogParameters)
+  Restart(Timestamp)
+  ActivatePlugin(ActivatePluginParameters)
+  DeactivatePlugin(DeactivatePluginParameters)
+  Revert(RevertParameters)
+  CancelPendingInvocation(CancelPendingInvocationParameters)
+  StartSpan(StartSpanParameters)
+  FinishSpan(FinishSpanParameters)
+  SetSpanAttribute(SetSpanAttributeParameters)
+  ChangePersistenceLevel(ChangePersistenceLevelParameters)
+  BeginRemoteTransaction(BeginRemoteTransactionParameters)
+  PreCommitRemoteTransaction(RemoteTransactionParameters)
+  PreRollbackRemoteTransaction(RemoteTransactionParameters)
+  CommittedRemoteTransaction(RemoteTransactionParameters)
+  RolledBackRemoteTransaction(RemoteTransactionParameters)
+  Snapshot(SnapshotParameters)
+}
+pub impl Eq for PublicOplogEntry
+pub impl Show for PublicOplogEntry
+
+pub(all) struct RawActivatePluginParameters {
+  timestamp : @wallClock.Datetime
+  plugin_priority : Int
+}
+pub impl Eq for RawActivatePluginParameters
+pub impl Show for RawActivatePluginParameters
+
+pub(all) struct RawAgentInvocationFinishedParameters {
+  timestamp : @wallClock.Datetime
+  result : OplogPayload
+  consumed_fuel : Int64
+  component_revision : UInt64
+}
+pub impl Eq for RawAgentInvocationFinishedParameters
+pub impl Show for RawAgentInvocationFinishedParameters
+
+pub(all) struct RawAgentInvocationStartedParameters {
+  timestamp : @wallClock.Datetime
+  idempotency_key : String
+  payload : OplogPayload
+  trace_id : String
+  trace_states : Array[String]
+  invocation_context : Array[SpanData]
+}
+pub impl Eq for RawAgentInvocationStartedParameters
+pub impl Show for RawAgentInvocationStartedParameters
+
+pub(all) struct RawBeginRemoteTransactionParameters {
+  timestamp : @wallClock.Datetime
+  transaction_id : String
+  original_begin_index : UInt64?
+}
+pub impl Eq for RawBeginRemoteTransactionParameters
+pub impl Show for RawBeginRemoteTransactionParameters
+
+pub(all) struct RawCreateParameters {
+  timestamp : @wallClock.Datetime
+  agent_id : @types.AgentId
+  component_revision : UInt64
+  env : Array[(String, String)]
+  environment_id : @host.EnvironmentId
+  created_by : @types.AccountId
+  parent : @types.AgentId?
+  component_size : UInt64
+  initial_total_linear_memory_size : UInt64
+  initial_active_plugins : FixedArray[Int]
+  config_vars : Array[(String, String)]
+  local_agent_config : Array[RawLocalAgentConfigEntry]
+  original_phantom_id : @types.Uuid?
+}
+pub impl Eq for RawCreateParameters
+pub impl Show for RawCreateParameters
+
+pub(all) struct RawCreateResourceParameters {
+  timestamp : @wallClock.Datetime
+  id : UInt64
+  resource_type_id : ResourceTypeId
+}
+pub impl Eq for RawCreateResourceParameters
+pub impl Show for RawCreateResourceParameters
+
+pub(all) struct RawDeactivatePluginParameters {
+  timestamp : @wallClock.Datetime
+  plugin_priority : Int
+}
+pub impl Eq for RawDeactivatePluginParameters
+pub impl Show for RawDeactivatePluginParameters
+
+pub(all) struct RawDropResourceParameters {
+  timestamp : @wallClock.Datetime
+  id : UInt64
+  resource_type_id : ResourceTypeId
+}
+pub impl Eq for RawDropResourceParameters
+pub impl Show for RawDropResourceParameters
+
+pub(all) struct RawErrorParameters {
+  timestamp : @wallClock.Datetime
+  error : WorkerError
+  retry_from : UInt64
+}
+pub impl Eq for RawErrorParameters
+pub impl Show for RawErrorParameters
+
+pub(all) struct RawHostCallParameters {
+  timestamp : @wallClock.Datetime
+  function_name : String
+  request : OplogPayload
+  response : OplogPayload
+  durable_function_type : WrappedFunctionType
+}
+pub impl Eq for RawHostCallParameters
+pub impl Show for RawHostCallParameters
+
+pub(all) struct RawLocalAgentConfigEntry {
+  key : Array[String]
+  value : @types.WitValue
+}
+pub impl Eq for RawLocalAgentConfigEntry
+pub impl Show for RawLocalAgentConfigEntry
+
+pub(all) struct RawPendingAgentInvocationParameters {
+  timestamp : @wallClock.Datetime
+  idempotency_key : String
+  payload : OplogPayload
+  trace_id : String
+  trace_states : Array[String]
+  invocation_context : Array[SpanData]
+}
+pub impl Eq for RawPendingAgentInvocationParameters
+pub impl Show for RawPendingAgentInvocationParameters
+
+pub(all) struct RawPendingUpdateParameters {
+  timestamp : @wallClock.Datetime
+  description : RawUpdateDescription
+}
+pub impl Eq for RawPendingUpdateParameters
+pub impl Show for RawPendingUpdateParameters
+
+pub(all) struct RawSnapshotBasedUpdate {
+  target_revision : UInt64
+  payload : OplogPayload
+  mime_type : String
+}
+pub impl Eq for RawSnapshotBasedUpdate
+pub impl Show for RawSnapshotBasedUpdate
+
+pub(all) struct RawSnapshotParameters {
+  timestamp : @wallClock.Datetime
+  data : OplogPayload
+  mime_type : String
+}
+pub impl Eq for RawSnapshotParameters
+pub impl Show for RawSnapshotParameters
+
+pub(all) struct RawSuccessfulUpdateParameters {
+  timestamp : @wallClock.Datetime
+  target_revision : UInt64
+  new_component_size : UInt64
+  new_active_plugins : FixedArray[Int]
+}
+pub impl Eq for RawSuccessfulUpdateParameters
+pub impl Show for RawSuccessfulUpdateParameters
+
+pub(all) enum RawUpdateDescription {
+  Automatic(UInt64)
+  SnapshotBased(RawSnapshotBasedUpdate)
+}
+pub impl Eq for RawUpdateDescription
+pub impl Show for RawUpdateDescription
+
 pub(all) struct RemoteTransactionParameters {
   timestamp : @wallClock.Datetime
   begin_index : UInt64
@@ -318,17 +597,29 @@ pub(all) struct RemoteTransactionParameters {
 pub impl Eq for RemoteTransactionParameters
 pub impl Show for RemoteTransactionParameters
 
+pub(all) struct ResourceTypeId {
+  name : String
+  owner : String
+}
+pub impl Eq for ResourceTypeId
+pub impl Show for ResourceTypeId
+
 pub(all) struct RevertParameters {
   timestamp : @wallClock.Datetime
-  start : UInt64
-  end : UInt64
+  dropped_region : OplogRegion
 }
 pub impl Eq for RevertParameters
 pub impl Show for RevertParameters
 
+pub(all) struct SaveSnapshotResultParameters {
+  snapshot : @host.Snapshot
+}
+pub impl Eq for SaveSnapshotResultParameters
+pub impl Show for SaveSnapshotResultParameters
+
 pub(all) struct SearchOplog(Int)
 pub fn SearchOplog::drop(Self) -> Unit
-pub fn SearchOplog::get_next(Self) -> Array[(UInt64, OplogEntry)]?
+pub fn SearchOplog::get_next(Self) -> Array[(UInt64, PublicOplogEntry)]?
 #deprecated
 pub fn SearchOplog::inner(Self) -> Int
 pub fn SearchOplog::search_oplog(@types.AgentId, String) -> Self
@@ -344,6 +635,14 @@ pub(all) struct SetSpanAttributeParameters {
 pub impl Eq for SetSpanAttributeParameters
 pub impl Show for SetSpanAttributeParameters
 
+pub(all) struct SnapshotParameters {
+  timestamp : @wallClock.Datetime
+  data : FixedArray[Byte]
+  mime_type : String
+}
+pub impl Eq for SnapshotParameters
+pub impl Show for SnapshotParameters
+
 pub(all) enum SpanData {
   LocalSpan(LocalSpanData)
   ExternalSpan(ExternalSpanData)
@@ -355,7 +654,7 @@ pub(all) struct StartSpanParameters {
   timestamp : @wallClock.Datetime
   span_id : String
   parent : String?
-  linked_context : String?
+  linked_context_id : String?
   attributes : Array[@context.Attribute]
 }
 pub impl Eq for StartSpanParameters
@@ -376,9 +675,16 @@ pub(all) struct Timestamp {
 pub impl Eq for Timestamp
 pub impl Show for Timestamp
 
+pub(all) struct TypedDataValue {
+  value : @types.DataValue
+  schema : @types.DataSchema
+}
+pub impl Eq for TypedDataValue
+pub impl Show for TypedDataValue
+
 pub(all) enum UpdateDescription {
   AutoUpdate
-  SnapshotBased(FixedArray[Byte])
+  SnapshotBased(@host.Snapshot)
 }
 pub impl Eq for UpdateDescription
 pub impl Show for UpdateDescription

@@ -1,7 +1,7 @@
 ///|
 /// Checks if any constructor parameter uses an RPC-incompatible type.
 fn has_rpc_incompatible_constructor(agent : AgentInfo) -> Bool {
-  agent.constructor_params
+  visible_params(agent.constructor_params)
   .iter()
   .find_first(fn(p) { is_rpc_incompatible_type(p.1) })
   is Some(_)
@@ -10,7 +10,7 @@ fn has_rpc_incompatible_constructor(agent : AgentInfo) -> Bool {
 ///|
 /// Checks if any parameter or return type of a method uses an RPC-incompatible type.
 fn method_has_rpc_incompatible_types(meth : MethodInfo) -> Bool {
-  for p in meth.params {
+  for p in visible_params(meth.params) {
     if is_rpc_incompatible_type(p.1) {
       return true
     }
@@ -29,9 +29,7 @@ pub fn generate_client_code(
 ) -> @list.List[@syntax.Impl] {
   let impls : Array[@syntax.Impl] = []
   for agent in agents {
-    // Skip agents with RPC-incompatible constructors — Multimodal and
-    // UnstructuredText/UnstructuredBinary types can't be serialized to WitValue
-    // for RPC transport
+    // Skip agents with RPC-incompatible constructors
     if has_rpc_incompatible_constructor(agent) {
       continue
     }
@@ -69,22 +67,22 @@ fn build_client_struct(client_name : String) -> @syntax.Impl {
 
 ///|
 /// Generates the expression that serializes constructor parameters into a `DataValue`.
+/// Principal parameters are excluded — they are auto-injected by the runtime.
 fn build_constructor_data_expr(agent : AgentInfo) -> @syntax.Expr {
-  // Check if the constructor has a multimodal parameter (must be the only param)
-  let has_multimodal = agent.constructor_params
-    .iter()
-    .find_first(fn(p) { is_multimodal_type(p.1) })
+  let vis = visible_params(agent.constructor_params)
+  // Check if the constructor has a multimodal parameter (must be the only visible param)
+  let has_multimodal = vis.iter().find_first(fn(p) { is_multimodal_type(p.1) })
   if has_multimodal is Some(_) {
     // Multimodal constructor: param.to_data_value()
-    let param_name = agent.constructor_params[0].0
+    let param_name = vis[0].0
     make_dot_apply(make_ident_expr(param_name), "to_data_value", [])
   } else {
-    let elements = agent.constructor_params.map(fn(param) {
+    let elements = vis.map(fn(param) {
       make_apply(make_qualified_expr("schema", "to_element_value_as"), [
         make_ident_expr(param.0),
       ])
     })
-    make_apply(make_qualified_constr("common", "DataValue", "Tuple"), [
+    make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
       make_array(elements),
     ])
   }
@@ -93,7 +91,8 @@ fn build_constructor_data_expr(agent : AgentInfo) -> @syntax.Expr {
 ///|
 /// Generates the `get` constructor that creates a client by initializing the remote agent.
 fn build_client_get(agent : AgentInfo, client_name : String) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   let body = make_let(
@@ -124,7 +123,8 @@ fn build_client_new_phantom(
   agent : AgentInfo,
   client_name : String,
 ) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   let body = make_let(
@@ -155,7 +155,8 @@ fn build_client_get_phantom(
   agent : AgentInfo,
   client_name : String,
 ) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   params.push(
@@ -203,7 +204,7 @@ fn build_client_get_agent_id(client_name : String) -> @syntax.Impl {
     "get_agent_id",
     [make_self_param(client_name)],
     Some(make_type("String")),
-    false,
+    true,
     body,
   )
 }
@@ -225,7 +226,7 @@ fn build_client_phantom_id(client_name : String) -> @syntax.Impl {
         make_qualified_parameterized_type("rpcTypes", "Uuid", []),
       ),
     ),
-    true,
+    false,
     body,
   )
 }
@@ -266,14 +267,13 @@ fn make_callback_type(client_name : String) -> @syntax.Type {
 /// Generates the `scoped` convenience method that acquires a client via `get`,
 /// defers `drop`, and calls a callback.
 fn build_client_scoped(agent : AgentInfo, client_name : String) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   params.push(make_typed_param("f", make_callback_type(client_name)))
   // Build body: let client = ClientName::get(args...); defer client.drop(); f(client)
-  let get_args : Array[@syntax.Expr] = agent.constructor_params.map(fn(p) {
-    make_ident_expr(p.0)
-  })
+  let get_args : Array[@syntax.Expr] = vis.map(fn(p) { make_ident_expr(p.0) })
   let body = make_let(
     "client",
     make_apply(make_method_ref(client_name, "get"), get_args),
@@ -300,13 +300,12 @@ fn build_client_scoped_new_phantom(
   agent : AgentInfo,
   client_name : String,
 ) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   params.push(make_typed_param("f", make_callback_type(client_name)))
-  let new_phantom_args : Array[@syntax.Expr] = agent.constructor_params.map(fn(
-    p,
-  ) {
+  let new_phantom_args : Array[@syntax.Expr] = vis.map(fn(p) {
     make_ident_expr(p.0)
   })
   let body = make_let(
@@ -335,7 +334,8 @@ fn build_client_scoped_get_phantom(
   agent : AgentInfo,
   client_name : String,
 ) -> @syntax.Impl {
-  let params : Array[@syntax.Parameter] = agent.constructor_params.map(fn(p) {
+  let vis = visible_params(agent.constructor_params)
+  let params : Array[@syntax.Parameter] = vis.map(fn(p) {
     make_typed_param(p.0, param_type_to_ast_type(p.1))
   })
   params.push(
@@ -345,9 +345,7 @@ fn build_client_scoped_get_phantom(
     ),
   )
   params.push(make_typed_param("f", make_callback_type(client_name)))
-  let get_phantom_args : Array[@syntax.Expr] = agent.constructor_params.map(fn(
-    p,
-  ) {
+  let get_phantom_args : Array[@syntax.Expr] = vis.map(fn(p) {
     make_ident_expr(p.0)
   })
   get_phantom_args.push(make_ident_expr("phantom_id"))
@@ -371,32 +369,29 @@ fn build_client_scoped_get_phantom(
 }
 
 ///|
-/// Generates the expression that serializes a single method parameter to a `WitValue` for RPC.
+/// Generates the expression that serializes a single method parameter to an `ElementValue` for RPC.
 fn build_rpc_param_expr(param : (String, ParamType)) -> @syntax.Expr {
-  let (name, pt) = param
-  if is_multimodal_type(pt) {
-    make_apply(make_qualified_expr("rpc", "multimodal_to_wit_value"), [
-      make_ident_expr(name),
-    ])
-  } else if is_unstructured_text_type(pt) {
-    make_apply(make_qualified_expr("rpc", "unstructured_text_to_wit_value"), [
-      make_ident_expr(name),
-    ])
-  } else if is_unstructured_binary_type(pt) {
-    make_apply(make_qualified_expr("rpc", "unstructured_binary_to_wit_value"), [
-      make_ident_expr(name),
-    ])
-  } else {
-    make_apply(make_qualified_expr("rpc", "to_wit_value"), [
-      make_ident_expr(name),
-    ])
-  }
+  let (name, _pt) = param
+  make_apply(make_qualified_expr("schema", "to_element_value_as"), [
+    make_ident_expr(name),
+  ])
 }
 
 ///|
-/// Generates the array expression containing all serialized method parameters for RPC.
+/// Generates the `DataValue` expression containing all serialized method parameters for RPC.
+/// Principal parameters are excluded — they are auto-injected by the runtime.
 fn build_rpc_params_expr(meth : MethodInfo) -> @syntax.Expr {
-  make_array(meth.params.map(build_rpc_param_expr))
+  let vis = visible_params(meth.params)
+  // Check if the method has a single multimodal parameter
+  let has_multimodal = vis.length() == 1 && is_multimodal_type(vis[0].1)
+  if has_multimodal {
+    let param_name = vis[0].0
+    make_dot_apply(make_ident_expr(param_name), "to_data_value", [])
+  } else {
+    make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
+      make_array(vis.map(build_rpc_param_expr)),
+    ])
+  }
 }
 
 ///|
@@ -408,9 +403,10 @@ fn build_client_method_invoke(
 ) -> @syntax.Impl {
   let rpc_name = rpc_function_name(agent.name, meth.name)
   let has_return = meth.return_type is Some(_)
-  let has_params = meth.params.length() > 0
+  let vis = visible_params(meth.params)
+  let has_multimodal_input = vis.length() == 1 && is_multimodal_type(vis[0].1)
   let params : Array[@syntax.Parameter] = [make_self_param(client_name)]
-  for p in meth.params {
+  for p in vis {
     params.push(make_typed_param(p.0, param_type_to_ast_type(p.1)))
   }
   let rpc_params = build_rpc_params_expr(meth)
@@ -420,30 +416,25 @@ fn build_client_method_invoke(
     [make_string_expr(rpc_name), rpc_params],
   )
   let body = if has_return {
-    let unwrapped = make_apply(make_qualified_expr("rpc", "unwrap_wit_tuple"), [
-      make_ident_expr("result"),
-    ])
-    let decode_expr = match meth.return_type {
-      Some(rt) =>
-        if is_multimodal_type(rt) {
-          make_apply(make_qualified_expr("rpc", "wit_value_to_multimodal"), [
-            unwrapped,
-          ])
-        } else if is_unstructured_text_type(rt) {
-          make_apply(
-            make_qualified_expr("rpc", "wit_value_to_unstructured_text"),
-            [unwrapped],
-          )
-        } else if is_unstructured_binary_type(rt) {
-          make_apply(
-            make_qualified_expr("rpc", "wit_value_to_unstructured_binary"),
-            [unwrapped],
-          )
-        } else {
-          make_apply(make_qualified_expr("rpc", "from_wit_value"), [unwrapped])
-        }
-      None =>
-        make_apply(make_qualified_expr("rpc", "from_wit_value"), [unwrapped])
+    let is_multimodal_output = match meth.return_type {
+      Some(rt) => is_multimodal_type(rt)
+      None => false
+    }
+    let decode_expr = if is_multimodal_output {
+      make_apply(
+        make_qualified_method_ref("types", "Multimodal", "from_data_value"),
+        [make_ident_expr("result")],
+      )
+    } else {
+      make_let(
+        "elements",
+        make_apply(make_qualified_expr("extractor", "extract_tuple"), [
+          make_ident_expr("result"),
+        ]),
+        make_apply(make_qualified_expr("schema", "from_element_value_as"), [
+          make_array_get(make_ident_expr("elements"), make_int_expr(0)),
+        ]),
+      )
     }
     make_let("result", invoke_expr, decode_expr)
   } else {
@@ -458,7 +449,7 @@ fn build_client_method_invoke(
     meth.name,
     params,
     return_type,
-    has_return || has_params,
+    has_return || has_multimodal_input || vis.length() > 0,
     body,
   )
 }
@@ -471,9 +462,10 @@ fn build_client_method_trigger(
   client_name : String,
 ) -> @syntax.Impl {
   let rpc_name = rpc_function_name(agent.name, meth.name)
-  let has_params = meth.params.length() > 0
+  let vis = visible_params(meth.params)
+  let has_params = vis.length() > 0
   let params : Array[@syntax.Parameter] = [make_self_param(client_name)]
-  for p in meth.params {
+  for p in vis {
     params.push(make_typed_param(p.0, param_type_to_ast_type(p.1)))
   }
   let rpc_params = build_rpc_params_expr(meth)
@@ -500,7 +492,8 @@ fn build_client_method_schedule(
   client_name : String,
 ) -> @syntax.Impl {
   let rpc_name = rpc_function_name(agent.name, meth.name)
-  let has_params = meth.params.length() > 0
+  let vis = visible_params(meth.params)
+  let has_params = vis.length() > 0
   let params : Array[@syntax.Parameter] = [make_self_param(client_name)]
   params.push(
     make_typed_param(
@@ -508,7 +501,7 @@ fn build_client_method_schedule(
       make_qualified_parameterized_type("wallClock", "Datetime", []),
     ),
   )
-  for p in meth.params {
+  for p in vis {
     params.push(make_typed_param(p.0, param_type_to_ast_type(p.1)))
   }
   let rpc_params = build_rpc_params_expr(meth)

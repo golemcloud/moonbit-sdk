@@ -101,6 +101,21 @@ fn make_int_expr(n : Int) -> @syntax.Expr {
 }
 
 ///|
+/// Creates a boolean literal expression.
+fn make_bool_expr(b : Bool) -> @syntax.Expr {
+  @syntax.Expr::Constant(c=@syntax.Constant::Bool(b), loc=dummy_loc)
+}
+
+///|
+/// Creates a UInt64 literal expression.
+fn make_uint64_expr(n : UInt64) -> @syntax.Expr {
+  @syntax.Expr::Constant(
+    c=@syntax.Constant::UInt64(n.to_string()),
+    loc=dummy_loc,
+  )
+}
+
+///|
 /// Creates a field access expression (`record.field`).
 fn make_field_access(
   record : @syntax.Expr,
@@ -230,6 +245,20 @@ fn make_apply(func : @syntax.Expr, args : Array[@syntax.Expr]) -> @syntax.Expr {
 }
 
 ///|
+/// Creates a function application expression with `!` error propagation suffix.
+fn make_apply_with_exclamation(
+  func : @syntax.Expr,
+  args : Array[@syntax.Expr],
+) -> @syntax.Expr {
+  @syntax.Expr::Apply(
+    func~,
+    args=to_list(args.map(make_positional_arg)),
+    attr=@syntax.ApplyAttr::Exclamation,
+    loc=dummy_loc,
+  )
+}
+
+///|
 /// Creates a function application expression with pre-built arguments.
 fn make_apply_with_args(
   func : @syntax.Expr,
@@ -298,6 +327,24 @@ fn make_record_with_type(
   @syntax.Expr::Record(
     type_name=Some(@syntax.TypeName::{
       name: @syntax.LongIdent::Dot(pkg~, id=type_name),
+      is_object: false,
+      loc: dummy_loc,
+    }),
+    fields=to_list(fields),
+    trailing=@syntax.TrailingMark::Comma,
+    loc=dummy_loc,
+  )
+}
+
+///|
+/// Creates a typed record literal expression with a local type (`Type::{ ... }`).
+fn make_record_with_local_type(
+  type_name : String,
+  fields : Array[@syntax.FieldDef],
+) -> @syntax.Expr {
+  @syntax.Expr::Record(
+    type_name=Some(@syntax.TypeName::{
+      name: @syntax.LongIdent::Ident(name=type_name),
       is_object: false,
       loc: dummy_loc,
     }),
@@ -557,7 +604,10 @@ fn make_struct_def(
     tycon: name,
     tycon_loc: dummy_loc,
     params: to_list([]),
-    components: @syntax.TypeDesc::Record(fields=to_list(field_decls), constr_decl=None),
+    components: @syntax.TypeDesc::Record(
+      fields=to_list(field_decls),
+      constr_decl=None,
+    ),
     attrs: to_list([]),
     doc: @syntax.DocString::empty(),
     type_vis: @syntax.Visibility::Pub(attr=Some("all"), loc=dummy_loc),

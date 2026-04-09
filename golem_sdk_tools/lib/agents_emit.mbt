@@ -123,16 +123,17 @@ fn build_multimodal_schema_expr(pt : ParamType) -> @syntax.Expr {
 ///|
 /// Generates the constructor lambda expression for an agent's `register_agent` call.
 fn build_construct_fn(agent : AgentInfo) -> @syntax.Expr {
-  let is_multimodal_ctor = agent.constructor_params.length() == 1 &&
-    is_multimodal_type(agent.constructor_params[0].1)
+  let ctor_visible = visible_params(agent.constructor_params)
+  let is_multimodal_ctor = ctor_visible.length() == 1 &&
+    is_multimodal_type(ctor_visible[0].1)
   let try_body = if is_multimodal_ctor {
     build_multimodal_construct_body(agent)
   } else {
     build_tuple_construct_body(agent)
   }
-  // fn(input) { try { ... } catch { e => Err(e) } }
+  // fn(input, principal) { try { ... } catch { e => Err(e) } }
   make_lambda(
-    ["input"],
+    ["input", "principal"],
     make_try_catch(try_body, [
       make_case(
         make_var_pattern("e"),
@@ -145,34 +146,72 @@ fn build_construct_fn(agent : AgentInfo) -> @syntax.Expr {
 ///|
 /// Generates the constructor body for agents with tuple-style (non-multimodal) parameters.
 fn build_tuple_construct_body(agent : AgentInfo) -> @syntax.Expr {
-  let param_count = agent.constructor_params.length()
+  let vis = visible_params(agent.constructor_params)
+  let vis_count = vis.length()
+  // Build ::new() args in original order, injecting `principal` for Principal-typed params
   let new_args = agent.constructor_params.map(fn(param) {
-    make_ident_expr(param.0)
+    if is_principal_type(param.1) {
+      make_ident_expr("principal")
+    } else if is_config_type(param.1) {
+      make_ident_expr(param.0)
+    } else {
+      make_ident_expr(param.0)
+    }
   })
   let new_call = make_apply(make_method_ref(agent.name, "new"), new_args)
-  let snapshottable_expr = if agent.has_snapshottable {
-    make_apply(make_constr_no_args("Some"), [make_ident_expr("agent")])
+  let use_auto_json = agent.has_json_derives && not(agent.has_snapshottable)
+  let (snapshottable_expr, snapshot_format_expr) = if agent.has_snapshottable ||
+    use_auto_json {
+    // Both manual Snapshottable and auto-JSON: agent itself implements Snapshottable
+    let format = if agent.has_snapshottable { "Binary" } else { "Json" }
+    (
+      make_apply(make_constr_no_args("Some"), [make_ident_expr("agent")]),
+      make_apply(make_constr_no_args("Some"), [
+        make_qualified_constr("agents", "SnapshotFormat", format),
+      ]),
+    )
   } else {
-    make_constr_no_args("None")
+    // No snapshot support
+    (make_constr_no_args("None"), make_constr_no_args("None"))
   }
   let constructed = make_record_with_type("agents", "ConstructedAgent", [
     make_field("raw", make_ident_expr("agent")),
     make_field("snapshottable", snapshottable_expr),
+    make_field("snapshot_format", snapshot_format_expr),
   ])
-  let ok_call = make_let(
-    "agent",
-    new_call,
-    make_let(
-      "constructed",
-      constructed,
-      make_apply(make_constr_no_args("Ok"), [make_ident_expr("constructed")]),
-    ),
+  let constructed_ok = make_let(
+    "constructed",
+    constructed,
+    make_apply(make_constr_no_args("Ok"), [make_ident_expr("constructed")]),
   )
-  // Build let bindings for each parameter (from last to first)
+  let ok_call = make_let("agent", new_call, constructed_ok)
+  // Add config param binding if present
   let mut body = ok_call
-  for idx in 0..<param_count {
-    let i = param_count - 1 - idx
-    let (name, pt) = agent.constructor_params[i]
+  match find_config_param(agent.constructor_params) {
+    Some((param_name, config_type_name, _)) => {
+      let config_type = param_type_to_ast_type(Simple(config_type_name))
+      let wrapped_type = make_qualified_parameterized_type("config", "Config", [
+        config_type,
+      ])
+      let type_tag_ty = make_qualified_parameterized_type("schema", "TypeTag", [
+        config_type,
+      ])
+      let tag_expr = make_constraint_expr(
+        make_record_with_type("schema", "TypeTag", []),
+        type_tag_ty,
+      )
+      let load_expr = make_apply_with_exclamation(
+        make_qualified_expr("config", "load_config"),
+        [tag_expr],
+      )
+      body = make_let_typed(param_name, wrapped_type, load_expr, body)
+    }
+    None => ()
+  }
+  // Build let bindings for visible params only (from last to first)
+  for idx in 0..<vis_count {
+    let i = vis_count - 1 - idx
+    let (name, pt) = vis[i]
     body = make_let_typed(
       name,
       param_type_to_ast_type(pt),
@@ -185,14 +224,14 @@ fn build_tuple_construct_body(agent : AgentInfo) -> @syntax.Expr {
   // guard elements.length() == N else { raise ... }
   let elements_length = make_dot_apply(make_ident_expr("elements"), "length", [])
   body = make_guard_else(
-    make_infix("==", elements_length, make_int_expr(param_count)),
+    make_infix("==", elements_length, make_int_expr(vis_count)),
     make_raise(
       make_apply(
         make_qualified_constr("common", "AgentError", "InvalidInput"),
         [
           make_infix(
             "+",
-            make_string_expr("Expected \{param_count} elements, got "),
+            make_string_expr("Expected \{vis_count} elements, got "),
             make_dot_apply(
               make_dot_apply(make_ident_expr("elements"), "length", []),
               "to_string",
@@ -217,28 +256,66 @@ fn build_tuple_construct_body(agent : AgentInfo) -> @syntax.Expr {
 ///|
 /// Generates the constructor body for agents with a single multimodal parameter.
 fn build_multimodal_construct_body(agent : AgentInfo) -> @syntax.Expr {
-  let (param_name, param_type) = agent.constructor_params[0]
-  let new_call = make_apply(make_method_ref(agent.name, "new"), [
-    make_ident_expr(param_name),
-  ])
-  let snapshottable_expr = if agent.has_snapshottable {
-    make_apply(make_constr_no_args("Some"), [make_ident_expr("agent")])
+  let vis = visible_params(agent.constructor_params)
+  let (param_name, param_type) = vis[0]
+  // Build ::new() args in original order, injecting `principal`/`config` for special params
+  let new_args = agent.constructor_params.map(fn(param) {
+    if is_principal_type(param.1) {
+      make_ident_expr("principal")
+    } else if is_config_type(param.1) {
+      make_ident_expr(param.0)
+    } else {
+      make_ident_expr(param.0)
+    }
+  })
+  let new_call = make_apply(make_method_ref(agent.name, "new"), new_args)
+  let use_auto_json = agent.has_json_derives && not(agent.has_snapshottable)
+  let (snapshottable_expr, snapshot_format_expr) = if agent.has_snapshottable ||
+    use_auto_json {
+    let format = if agent.has_snapshottable { "Binary" } else { "Json" }
+    (
+      make_apply(make_constr_no_args("Some"), [make_ident_expr("agent")]),
+      make_apply(make_constr_no_args("Some"), [
+        make_qualified_constr("agents", "SnapshotFormat", format),
+      ]),
+    )
   } else {
-    make_constr_no_args("None")
+    (make_constr_no_args("None"), make_constr_no_args("None"))
   }
   let constructed = make_record_with_type("agents", "ConstructedAgent", [
     make_field("raw", make_ident_expr("agent")),
     make_field("snapshottable", snapshottable_expr),
+    make_field("snapshot_format", snapshot_format_expr),
   ])
-  let ok_call = make_let(
-    "agent",
-    new_call,
-    make_let(
-      "constructed",
-      constructed,
-      make_apply(make_constr_no_args("Ok"), [make_ident_expr("constructed")]),
-    ),
+  let constructed_ok = make_let(
+    "constructed",
+    constructed,
+    make_apply(make_constr_no_args("Ok"), [make_ident_expr("constructed")]),
   )
+  let ok_call = make_let("agent", new_call, constructed_ok)
+  // Add config param binding if present
+  let mut body = ok_call
+  match find_config_param(agent.constructor_params) {
+    Some((cfg_param_name, config_type_name, _)) => {
+      let config_type = param_type_to_ast_type(Simple(config_type_name))
+      let wrapped_type = make_qualified_parameterized_type("config", "Config", [
+        config_type,
+      ])
+      let type_tag_ty = make_qualified_parameterized_type("schema", "TypeTag", [
+        config_type,
+      ])
+      let tag_expr = make_constraint_expr(
+        make_record_with_type("schema", "TypeTag", []),
+        type_tag_ty,
+      )
+      let load_expr = make_apply_with_exclamation(
+        make_qualified_expr("config", "load_config"),
+        [tag_expr],
+      )
+      body = make_let_typed(cfg_param_name, wrapped_type, load_expr, body)
+    }
+    None => ()
+  }
   // let param_name : Type = @types.Multimodal::from_data_value(input)
   make_let_typed(
     param_name,
@@ -247,21 +324,24 @@ fn build_multimodal_construct_body(agent : AgentInfo) -> @syntax.Expr {
       make_qualified_method_ref("types", "Multimodal", "from_data_value"),
       [make_ident_expr("input")],
     ),
-    ok_call,
+    body,
   )
 }
 
 ///|
 /// Generates an AST expression for an `AgentMethod` record literal.
 fn build_method_record(info : MethodInfo) -> @syntax.Expr {
-  let is_multimodal_input = info.params.length() == 1 &&
-    is_multimodal_type(info.params[0].1)
+  let vis = visible_params(info.params)
+  let is_multimodal_input = vis.length() == 1 && is_multimodal_type(vis[0].1)
   let input_schema = if is_multimodal_input {
-    make_apply(make_qualified_constr("common", "DataSchema", "Multimodal"), [
-      build_multimodal_schema_expr(info.params[0].1),
+    make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Multimodal"), [
+      build_multimodal_schema_expr(vis[0].1),
     ])
   } else {
-    let input_elems = info.params.map(fn(param) {
+    // Reorder params to match Golem runtime's HTTP parameter assembly order:
+    // HTTP-bound params (path, query, header) first, then body params.
+    let reordered = http_reorder_params(vis, info.http_endpoint)
+    let input_elems = reordered.map(fn(param) {
       let (name, pt) = param
       let opts = info.param_schema_options.get(name)
       make_tuple([
@@ -269,7 +349,7 @@ fn build_method_record(info : MethodInfo) -> @syntax.Expr {
         param_type_to_schema_expr(pt, options=opts),
       ])
     })
-    make_apply(make_qualified_constr("common", "DataSchema", "Tuple"), [
+    make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Tuple"), [
       make_array(input_elems),
     ])
   }
@@ -278,13 +358,13 @@ fn build_method_record(info : MethodInfo) -> @syntax.Expr {
     None => false
   }
   let output_schema = if is_multimodal_output {
-    make_apply(make_qualified_constr("common", "DataSchema", "Multimodal"), [
+    make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Multimodal"), [
       build_multimodal_schema_expr(info.return_type.unwrap()),
     ])
   } else {
     match info.return_type {
       Some(pt) =>
-        make_apply(make_qualified_constr("common", "DataSchema", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Tuple"), [
           make_array([
             make_tuple([
               make_string_expr("result"),
@@ -293,7 +373,7 @@ fn build_method_record(info : MethodInfo) -> @syntax.Expr {
           ]),
         ])
       None =>
-        make_apply(make_qualified_constr("common", "DataSchema", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Tuple"), [
           make_array([]),
         ])
     }
@@ -305,6 +385,7 @@ fn build_method_record(info : MethodInfo) -> @syntax.Expr {
   make_record([
     make_field("name", make_string_expr(info.name)),
     make_field("description", make_string_expr(info.description)),
+    make_field("http_endpoint", emit_http_endpoint_array(info.http_endpoint)),
     make_field("prompt_hint", hint_expr),
     make_field("input_schema", input_schema),
     make_field("output_schema", output_schema),
@@ -312,15 +393,44 @@ fn build_method_record(info : MethodInfo) -> @syntax.Expr {
 }
 
 ///|
+/// Generates an AST expression for the `Snapshotting` enum value.
+fn build_snapshotting_expr(snapshotting : AgentSnapshotting) -> @syntax.Expr {
+  match snapshotting {
+    Disabled => make_qualified_constr("common", "Snapshotting", "Disabled")
+    Default =>
+      make_apply(make_qualified_constr("common", "Snapshotting", "Enabled"), [
+        make_qualified_constr("common", "SnapshottingConfig", "Default"),
+      ])
+    Periodic(n) =>
+      make_apply(make_qualified_constr("common", "Snapshotting", "Enabled"), [
+        make_apply(
+          make_qualified_constr("common", "SnapshottingConfig", "Periodic"),
+          [make_uint64_expr(n)],
+        ),
+      ])
+    EveryNInvocation(n) =>
+      make_apply(make_qualified_constr("common", "Snapshotting", "Enabled"), [
+        make_apply(
+          make_qualified_constr(
+            "common", "SnapshottingConfig", "EveryNInvocation",
+          ),
+          [make_uint_expr(n.reinterpret_as_int())],
+        ),
+      ])
+  }
+}
+
+///|
 pub fn build_agent_type_expr(agent : AgentInfo) -> @syntax.Expr {
-  let is_multimodal_ctor = agent.constructor_params.length() == 1 &&
-    is_multimodal_type(agent.constructor_params[0].1)
+  let ctor_visible = visible_params(agent.constructor_params)
+  let is_multimodal_ctor = ctor_visible.length() == 1 &&
+    is_multimodal_type(ctor_visible[0].1)
   let input_schema = if is_multimodal_ctor {
-    make_apply(make_qualified_constr("common", "DataSchema", "Multimodal"), [
-      build_multimodal_schema_expr(agent.constructor_params[0].1),
+    make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Multimodal"), [
+      build_multimodal_schema_expr(ctor_visible[0].1),
     ])
   } else {
-    let schema_elems = agent.constructor_params.map(fn(param) {
+    let schema_elems = ctor_visible.map(fn(param) {
       let (name, pt) = param
       let opts = agent.constructor_schema_options.get(name)
       make_tuple([
@@ -328,7 +438,7 @@ pub fn build_agent_type_expr(agent : AgentInfo) -> @syntax.Expr {
         param_type_to_schema_expr(pt, options=opts),
       ])
     })
-    make_apply(make_qualified_constr("common", "DataSchema", "Tuple"), [
+    make_apply(make_qualified_constr("rpcTypes", "DataSchema", "Tuple"), [
       make_array(schema_elems),
     ])
   }
@@ -349,6 +459,7 @@ pub fn build_agent_type_expr(agent : AgentInfo) -> @syntax.Expr {
   make_record([
     make_field("type_name", make_string_expr(agent.name)),
     make_field("description", make_string_expr(agent.description)),
+    make_field("source_language", make_string_expr("moonbit")),
     make_field("constructor_", constructor_record),
     make_field("methods", make_array(method_records)),
     make_field("dependencies", make_array([])),
@@ -363,7 +474,32 @@ pub fn build_agent_type_expr(agent : AgentInfo) -> @syntax.Expr {
         },
       ),
     ),
+    make_field("http_mount", emit_http_mount_expr(agent.http_mount)),
+    make_field("snapshotting", build_snapshotting_expr(agent.snapshotting)),
+    make_field("config", build_config_entries_expr(agent)),
   ])
+}
+
+///|
+/// Generates the config entries expression for an agent's `AgentType.config` field.
+fn build_config_entries_expr(agent : AgentInfo) -> @syntax.Expr {
+  match agent.config_type {
+    Some(type_name) => {
+      let ty = param_type_to_ast_type(Simple(type_name))
+      let type_tag_ty = make_qualified_parameterized_type("schema", "TypeTag", [
+        ty,
+      ])
+      let tag_expr = make_constraint_expr(
+        make_record_with_type("schema", "TypeTag", []),
+        type_tag_ty,
+      )
+      make_apply(make_qualified_expr("config", "collect_entries_of"), [
+        tag_expr,
+        make_array([]),
+      ])
+    }
+    None => make_array([])
+  }
 }
 
 ///|
@@ -382,8 +518,8 @@ fn build_register_call(agent : AgentInfo) -> @syntax.Expr {
 ///|
 /// Generates the match arm body for a method invocation, dispatching to tuple or multimodal handling.
 fn build_method_arm_body(info : MethodInfo) -> @syntax.Expr {
-  let is_multimodal_input = info.params.length() == 1 &&
-    is_multimodal_type(info.params[0].1)
+  let vis = visible_params(info.params)
+  let is_multimodal_input = vis.length() == 1 && is_multimodal_type(vis[0].1)
   let is_multimodal_output = match info.return_type {
     Some(pt) => is_multimodal_type(pt)
     None => false
@@ -400,10 +536,18 @@ fn build_method_arm_body(info : MethodInfo) -> @syntax.Expr {
 ///|
 /// Generates the match arm body for a tuple-style method invocation with parameter deserialization and result serialization.
 fn build_tuple_method_arm_body(info : MethodInfo) -> @syntax.Expr {
-  let param_count = info.params.length()
+  // Reorder to match schema order (HTTP-bound first, then body)
+  let vis = http_reorder_params(visible_params(info.params), info.http_endpoint)
+  let vis_count = vis.length()
   let has_return = info.return_type is Some(_)
-  // Build the method call
-  let method_args = info.params.map(fn(param) { make_ident_expr(param.0) })
+  // Build the method call with ALL params in original order, injecting `principal` for Principal-typed params
+  let method_args = info.params.map(fn(param) {
+    if is_principal_type(param.1) {
+      make_ident_expr("principal")
+    } else {
+      make_ident_expr(param.0)
+    }
+  })
   let call = make_dot_apply(make_ident_expr("self"), info.name, method_args)
   // Build the Ok(...) result expression
   let ok_expr = if has_return {
@@ -411,7 +555,7 @@ fn build_tuple_method_arm_body(info : MethodInfo) -> @syntax.Expr {
       "result",
       call,
       make_apply(make_constr_no_args("Ok"), [
-        make_apply(make_qualified_constr("common", "DataValue", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
           make_array([
             make_apply(make_qualified_expr("schema", "to_element_value_as"), [
               make_ident_expr("result"),
@@ -424,17 +568,17 @@ fn build_tuple_method_arm_body(info : MethodInfo) -> @syntax.Expr {
     make_sequence([
       call,
       make_apply(make_constr_no_args("Ok"), [
-        make_apply(make_qualified_constr("common", "DataValue", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
           make_array([]),
         ]),
       ]),
     ])
   }
-  // Build let bindings for each param (from last to first)
+  // Build let bindings for visible params only (from last to first)
   let mut body = ok_expr
-  for idx in 0..<param_count {
-    let i = param_count - 1 - idx
-    let (name, pt) = info.params[i]
+  for idx in 0..<vis_count {
+    let i = vis_count - 1 - idx
+    let (name, pt) = vis[i]
     body = make_let_typed(
       name,
       param_type_to_ast_type(pt),
@@ -447,14 +591,14 @@ fn build_tuple_method_arm_body(info : MethodInfo) -> @syntax.Expr {
   // guard elements.length() == N
   let elements_length = make_dot_apply(make_ident_expr("elements"), "length", [])
   body = make_guard_else(
-    make_infix("==", elements_length, make_int_expr(param_count)),
+    make_infix("==", elements_length, make_int_expr(vis_count)),
     make_raise(
       make_apply(
         make_qualified_constr("common", "AgentError", "InvalidInput"),
         [
           make_infix(
             "+",
-            make_string_expr("Expected \{param_count} elements, got "),
+            make_string_expr("Expected \{vis_count} elements, got "),
             make_dot_apply(
               make_dot_apply(make_ident_expr("elements"), "length", []),
               "to_string",
@@ -483,8 +627,14 @@ fn build_multimodal_method_arm_body(
   multimodal_input : Bool,
   multimodal_output : Bool,
 ) -> @syntax.Expr {
-  // Build the method call
-  let method_args = info.params.map(fn(param) { make_ident_expr(param.0) })
+  // Build the method call with ALL params in original order, injecting `principal` for Principal-typed params
+  let method_args = info.params.map(fn(param) {
+    if is_principal_type(param.1) {
+      make_ident_expr("principal")
+    } else {
+      make_ident_expr(param.0)
+    }
+  })
   let call = make_dot_apply(make_ident_expr("self"), info.name, method_args)
   // Build result wrapping
   let has_return = info.return_type is Some(_)
@@ -505,7 +655,7 @@ fn build_multimodal_method_arm_body(
       "result",
       call,
       make_apply(make_constr_no_args("Ok"), [
-        make_apply(make_qualified_constr("common", "DataValue", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
           make_array([
             make_apply(make_qualified_expr("schema", "to_element_value_as"), [
               make_ident_expr("result"),
@@ -520,7 +670,7 @@ fn build_multimodal_method_arm_body(
     make_sequence([
       call,
       make_apply(make_constr_no_args("Ok"), [
-        make_apply(make_qualified_constr("common", "DataValue", "Tuple"), [
+        make_apply(make_qualified_constr("rpcTypes", "DataValue", "Tuple"), [
           make_array([]),
         ]),
       ]),
@@ -528,7 +678,8 @@ fn build_multimodal_method_arm_body(
   }
   // Build param deserialization
   if multimodal_input {
-    let (param_name, param_type) = info.params[0]
+    let vis = visible_params(info.params)
+    let (param_name, param_type) = vis[0]
     // let param_name : Type = @types.Multimodal::from_data_value(input)
     make_let_typed(
       param_name,
@@ -541,11 +692,16 @@ fn build_multimodal_method_arm_body(
     )
   } else {
     // Non-multimodal input with multimodal output — use tuple extraction as normal
-    let param_count = info.params.length()
+    // Reorder to match schema order (HTTP-bound first, then body)
+    let vis = http_reorder_params(
+      visible_params(info.params),
+      info.http_endpoint,
+    )
+    let vis_count = vis.length()
     let mut body = ok_expr
-    for idx in 0..<param_count {
-      let i = param_count - 1 - idx
-      let (name, pt) = info.params[i]
+    for idx in 0..<vis_count {
+      let i = vis_count - 1 - idx
+      let (name, pt) = vis[i]
       body = make_let_typed(
         name,
         param_type_to_ast_type(pt),
@@ -561,14 +717,14 @@ fn build_multimodal_method_arm_body(
       [],
     )
     body = make_guard_else(
-      make_infix("==", elements_length, make_int_expr(param_count)),
+      make_infix("==", elements_length, make_int_expr(vis_count)),
       make_raise(
         make_apply(
           make_qualified_constr("common", "AgentError", "InvalidInput"),
           [
             make_infix(
               "+",
-              make_string_expr("Expected \{param_count} elements, got "),
+              make_string_expr("Expected \{vis_count} elements, got "),
               make_dot_apply(
                 make_dot_apply(make_ident_expr("elements"), "length", []),
                 "to_string",
@@ -621,9 +777,52 @@ pub fn build_raw_agent_impl(agent : AgentInfo) -> @syntax.Impl {
     "agents",
     "RawAgent",
     "invoke",
-    ["self", "method_name", "input"],
+    ["self", "method_name", "input", "principal"],
     try_body,
   )
+}
+
+///|
+/// Generates direct `impl Snapshottable for AgentName` impls for each agent
+/// with JSON derives (ToJson + FromJson). The save_snapshot serializes to JSON,
+/// and load_snapshot deserializes and assigns each field individually.
+fn build_snapshottable_impls(
+  agents : Array[AgentInfo],
+) -> @list.List[@syntax.Impl] {
+  let needs_impls = agents
+    .iter()
+    .any(fn(a) { a.has_json_derives && not(a.has_snapshottable) })
+  if not(needs_impls) {
+    return @list.List::from_array([])
+  }
+  let buf = StringBuilder::new()
+  for agent in agents {
+    if agent.has_json_derives && not(agent.has_snapshottable) {
+      let name = agent.name
+      buf.write_string(
+        "///|\nimpl @agents.Snapshottable for \{name} with save_snapshot(self) -> Bytes {\n  let json_str = self.to_json().stringify()\n  Bytes::from_array(json_str.to_array().map(fn(c) { c.to_int().to_byte() }))\n}\n\n",
+      )
+      buf.write_string(
+        "///|\nimpl @agents.Snapshottable for \{name} with load_snapshot(self, bytes) -> Result[Unit, String] {\n" +
+        "  let chars : Array[Char] = []\n" +
+        "  for i in 0..<bytes.length() {\n" +
+        "    chars.push(Char::from_int(bytes[i].to_int()))\n" +
+        "  }\n" +
+        "  let json_str = String::from_array(chars)\n" +
+        "  let json = try { @json.parse!(json_str) } catch { e => return Err(\"Failed to parse snapshot JSON: \" + e.to_string()) }\n" +
+        "  let new_val : \{name} = try { @json.from_json!(json) } catch { e => return Err(\"Failed to deserialize snapshot: \" + e.to_string()) }\n",
+      )
+      for field in agent.fields {
+        let (field_name, is_mut) = field
+        if is_mut {
+          buf.write_string("  self.\{field_name} = new_val.\{field_name}\n")
+        }
+      }
+      buf.write_string("  Ok(())\n}\n\n")
+    }
+  }
+  let (parsed, _) = @parser.parse_string(buf.to_string())
+  parsed
 }
 
 ///|
@@ -637,6 +836,7 @@ pub fn generate_agent_registration(
   let needs_try_catch = agents
     .iter()
     .any(fn(a) {
+      a.config_type is Some(_) ||
       a.constructor_schema_options
       .iter()
       .any(fn(kv) {
@@ -669,5 +869,8 @@ pub fn generate_agent_registration(
   for impl_ in impls {
     all.push(impl_)
   }
+  // Append Snapshottable impls for agents with JSON derives
+  let snapshottable_impls = build_snapshottable_impls(agents)
+  snapshottable_impls.each(fn(impl_) { all.push(impl_) })
   to_list(all)
 }

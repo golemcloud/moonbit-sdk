@@ -1,10 +1,10 @@
 import {
-  "justjavac/case" @case,
   "moonbitlang/core/list",
   "moonbitlang/parser",
   "moonbitlang/parser/attribute",
   "moonbitlang/parser/syntax",
   "moonbitlang/parser/basic",
+  "moonbitlang/x/fs",
 }
 
 import {

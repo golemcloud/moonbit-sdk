@@ -1,8 +1,12 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "golemcloud/golem_sdk/gen/interface/golem/api/saveSnapshot"
 
+import {
+  "golemcloud/golem_sdk/interface/golem/api/host",
+}
+
 // Values
-pub fn save() -> FixedArray[Byte]
+pub fn save() -> @host.Snapshot
 
 // Errors
 

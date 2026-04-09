@@ -12,15 +12,15 @@ pub fn wasmExportGetDefinition() -> Int
 
 pub fn wasmExportGetDefinitionPostReturn(Int) -> Unit
 
-pub fn wasmExportInitialize(Int, Int, Int, Int, Int) -> Int
+pub fn wasmExportInitialize(Int) -> Int
 
 pub fn wasmExportInitializePostReturn(Int) -> Unit
 
-pub fn wasmExportInvoke(Int, Int, Int, Int, Int) -> Int
+pub fn wasmExportInvoke(Int) -> Int
 
 pub fn wasmExportInvokePostReturn(Int) -> Unit
 
-pub fn wasmExportLoad(Int, Int) -> Int
+pub fn wasmExportLoad(Int, Int, Int, Int) -> Int
 
 pub fn wasmExportLoadPostReturn(Int) -> Unit
 
